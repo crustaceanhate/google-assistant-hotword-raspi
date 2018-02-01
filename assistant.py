@@ -24,29 +24,36 @@ import google.auth.transport.grpc
 import google.auth.transport.requests
 import google.oauth2.credentials
 
-from google.assistant.embedded.v1alpha1 import embedded_assistant_pb2
-from google.rpc import code_pb2
+from google.assistant.embedded.v1alpha2 import (
+    embedded_assistant_pb2,
+    embedded_assistant_pb2_grpc
+)
+
 from tenacity import retry, stop_after_attempt, retry_if_exception
 
 try:
-    from googlesamples.assistant.grpc import (
+    from . import (
         assistant_helpers,
-        audio_helpers
+        audio_helpers,
+        device_helpers
     )
 except SystemError:
     import assistant_helpers
     import audio_helpers
-
+    import device_helpers
 
 ASSISTANT_API_ENDPOINT = 'embeddedassistant.googleapis.com'
-END_OF_UTTERANCE = embedded_assistant_pb2.ConverseResponse.END_OF_UTTERANCE
-DIALOG_FOLLOW_ON = embedded_assistant_pb2.ConverseResult.DIALOG_FOLLOW_ON
-CLOSE_MICROPHONE = embedded_assistant_pb2.ConverseResult.CLOSE_MICROPHONE
+END_OF_UTTERANCE = embedded_assistant_pb2.AssistResponse.END_OF_UTTERANCE
+DIALOG_FOLLOW_ON = embedded_assistant_pb2.DialogStateOut.DIALOG_FOLLOW_ON
+CLOSE_MICROPHONE = embedded_assistant_pb2.DialogStateOut.CLOSE_MICROPHONE
 DEFAULT_GRPC_DEADLINE = 60 * 3 + 5
 
 
 class Assistant():
-    def __init__(self):
+    def __init__(self,language_code,device_id,device_model_id):
+        self.device_id=device_id
+        self.device_model_id=device_model_id
+        self.language_code=language_code
         self.api_endpoint = ASSISTANT_API_ENDPOINT
         self.credentials = os.path.join(click.get_app_dir('google-oauthlib-tool'),
                                    'credentials.json')
@@ -81,7 +88,7 @@ class Assistant():
         self.grpc_deadline = DEFAULT_GRPC_DEADLINE
 
         # Create Google Assistant API gRPC client.
-        self.assistant = embedded_assistant_pb2.EmbeddedAssistantStub(self.grpc_channel)
+        self.assistant = embedded_assistant_pb2_grpc.EmbeddedAssistantStub(self.grpc_channel)
 
         # Stores an opaque blob provided in ConverseResponse that,
         # when provided in a follow-up ConverseRequest,
@@ -131,42 +138,43 @@ class Assistant():
                 self.conversation_stream.start_recording()
                 self.logger.info('Recording audio request.')
 
-                def iter_converse_requests():
-                    for c in self.gen_converse_requests():
-                        assistant_helpers.log_converse_request_without_audio(c)
+                def iter_assist_requests():
+                    for c in self.gen_assist_requests():
+                        assistant_helpers.log_assist_request_without_audio(c)
                         yield c
                     self.conversation_stream.start_playback()
 
-                # This generator yields ConverseResponse proto messages
+                # This generator yields AssistResponse proto messages
                 # received from the gRPC Google Assistant API.
-                for resp in self.assistant.Converse(iter_converse_requests(),
+                for resp in self.assistant.Assist(iter_assist_requests(),
                                                     self.grpc_deadline):
-                    assistant_helpers.log_converse_response_without_audio(resp)
-                    if resp.error.code != code_pb2.OK:
-                        self.logger.error('server error: %s', resp.error.message)
-                        break
+                    assistant_helpers.log_assist_response_without_audio(resp)
                     if resp.event_type == END_OF_UTTERANCE:
                         self.logger.info('End of audio request detected')
                         self.conversation_stream.stop_recording()
-                    if resp.result.spoken_request_text:
+                    if resp.speech_results:
                         self.logger.info('Transcript of user request: "%s".',
-                                     resp.result.spoken_request_text)
+                                         ' '.join(r.transcript
+                                                  for r in resp.speech_results))
                         self.logger.info('Playing assistant response.')
+                    if resp.dialog_state_out.supplemental_display_text:
+                        display_text=resp.dialog_state_out.supplemental_display_text
+                        self.logger.info('Response text:' + ''.join(display_text))
                     if len(resp.audio_out.audio_data) > 0:
                         self.conversation_stream.write(resp.audio_out.audio_data)
-                    if resp.result.spoken_response_text:
-                        self.logger.info(
-                            'Transcript of TTS response '
-                            '(only populated from IFTTT): "%s".',
-                            resp.result.spoken_response_text)
-                    if resp.result.conversation_state:
-                        self.conversation_state_bytes = resp.result.conversation_state
-                    if resp.result.volume_percentage != 0:
-                        volume_percentage = resp.result.volume_percentage
+                    if resp.dialog_state_out.conversation_state:
+                        self.conversation_state_bytes = resp.dialog_state_out.conversation_state
+                        self.logger.info('Updating conversation state.')
+                    if resp.dialog_state_out.volume_percentage != 0:
+                        volume_percentage = resp.dialog_state_out.volume_percentage
                         self.logger.info('Volume should be set to %s%%', volume_percentage)
-                    if resp.result.microphone_mode == DIALOG_FOLLOW_ON:
+                        self.conversation_stream.volume_percentage = volume_percentage
+                    if resp.dialog_state_out.microphone_mode == DIALOG_FOLLOW_ON:
                         continue_dialog = True
                         self.logger.info('Expecting follow-on query from user.')
+                    elif resp.dialog_state_out.microphone_mode == CLOSE_MICROPHONE:
+                        continue_dialog = False
+
                 self.logger.info('Finished playing assistant response.')
                 self.conversation_stream.stop_playback()
         except Exception as e:
@@ -187,7 +195,7 @@ class Assistant():
 
         self.logger.info('Connecting to %s', self.api_endpoint)
         # Create Google Assistant API gRPC client.
-        self.assistant = embedded_assistant_pb2.EmbeddedAssistantStub(grpc_channel)
+        self.assistant = embedded_assistant_pb2_grpc.EmbeddedAssistantStub(grpc_channel)
 
     def is_grpc_error_unavailable(e):
         is_grpc_error = isinstance(e, grpc.RpcError)
@@ -201,16 +209,18 @@ class Assistant():
     
     # This generator yields ConverseRequest to send to the gRPC
     # Google Assistant API.
-    def gen_converse_requests(self):
+    def gen_assist_requests(self):
         """Yields: ConverseRequest messages to send to the API."""
-        converse_state = None
+        
+        dialog_state_in = embedded_assistant_pb2.DialogStateIn(
+                language_code=self.language_code,
+                conversation_state=b''
+            )
         if self.conversation_state_bytes:
             logging.debug('Sending converse_state: %s',
                           self.conversation_state_bytes)
-            converse_state = embedded_assistant_pb2.ConverseState(
-                conversation_state=self.conversation_state_bytes,
-            )
-        config = embedded_assistant_pb2.ConverseConfig(
+            dialog_state_in.conversation_state = self.conversation_state_bytes
+        config = embedded_assistant_pb2.AssistConfig(
             audio_in_config=embedded_assistant_pb2.AudioInConfig(
                 encoding='LINEAR16',
                 sample_rate_hertz=self.conversation_stream.sample_rate,
@@ -220,11 +230,15 @@ class Assistant():
                 sample_rate_hertz=self.conversation_stream.sample_rate,
                 volume_percentage=self.conversation_stream.volume_percentage,
             ),
-            converse_state=converse_state
+            dialog_state_in=dialog_state_in,
+            device_config=embedded_assistant_pb2.DeviceConfig(
+                device_id=self.device_id,
+                device_model_id=self.device_model_id,
+            )
         )
         # The first ConverseRequest must contain the ConverseConfig
         # and no audio data.
-        yield embedded_assistant_pb2.ConverseRequest(config=config)
+        yield embedded_assistant_pb2.AssistRequest(config=config)
         for data in self.conversation_stream:
             # Subsequent requests need audio data, but not config.
-            yield embedded_assistant_pb2.ConverseRequest(audio_in=data)
+            yield embedded_assistant_pb2.AssistRequest(audio_in=data)

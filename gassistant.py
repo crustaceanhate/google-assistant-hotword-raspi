@@ -29,8 +29,10 @@ model = sys.argv[1]
 # capture SIGINT signal, e.g., Ctrl+C
 signal.signal(signal.SIGINT, signal_handler)
 
-detector = snowboydecoder.HotwordDetector(model, sensitivity=0.5)
-assistant = Assistant()
+detector = snowboydecoder.HotwordDetector(model, sensitivity=0.5, audio_gain=10)
+assistant = Assistant(language_code="en-AU",
+                      device_model_id="bmbb-assistant-model-id",
+                      device_id="bmbb-assistant")
 
 
 def detect_callback():
