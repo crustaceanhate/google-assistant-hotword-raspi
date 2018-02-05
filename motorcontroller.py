@@ -15,14 +15,22 @@ class MotorController():
         GPIO.setup(self.body_towards_pin, GPIO.OUT, initial=GPIO.LOW)
         GPIO.setup(self.body_away_pin, GPIO.OUT, initial=GPIO.LOW)
         
-    def move_mouth(open):
-        GPIO.set(self.mouth_open_pin, open)
-        GPIO.set(self.mouth_close_pin, not open)
+    def open_mouth():
+        GPIO.set(self.mouth_open_pin, True)
+        GPIO.set(self.mouth_close_pin, False)
     
-    def move_body(towards):
-        GPIO.set(self.body_towards_pin, towards)
-        GPIO.set(self.body_away_pin, not towards)
+    def close_mouth():
+        GPIO.set(self.mouth_open_pin, False)
+        GPIO.set(self.mouth_close_pin, True)
+    
+    def body_towards():
+        GPIO.set(self.body_towards_pin, True)
+        GPIO.set(self.body_away_pin, False)
         
+    def body_away():
+        GPIO.set(self.body_towards_pin, False)
+        GPIO.set(self.body_away_pin, True)
+                 
     def close():
         GPIO.cleanup()
    
