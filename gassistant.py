@@ -3,8 +3,25 @@ import sys
 import signal
 import time
 import logging
-from assistant import Assistant
+import threading
 
+from assistant import Assistant
+from motorcontroller import MotorController
+
+class TalkThread(threading.Thread):
+    """Thread class with a stop() method. The thread itself has to check
+    regularly for the stopped() condition."""
+
+    def __init__(self):
+        super(TalkThread, self).__init__()
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def stopped(self):
+        return self._stop_event.is_set()
+    
 interrupted = False
 
 logging.basicConfig()
@@ -20,14 +37,22 @@ def signal_handler(signal, frame):
     global interrupted
     interrupted = True
 
-
 def interrupt_callback():
     global interrupted
     return interrupted
 
+def response_callback(talkthread, text):
+    if talkthread.isAlive():
+        talkthread.stop()
+        talkthread.join()
+    
+    
+    
 model = sys.argv[1]
 # capture SIGINT signal, e.g., Ctrl+C
 signal.signal(signal.SIGINT, signal_handler)
+
+motorcontroller = MotorController(mouth_open_pin=1,mouth_close_pin=2,body_towards_pin=4,body_away_pin=4)
 
 detector = snowboydecoder.HotwordDetector(model, sensitivity=0.5, audio_gain=10)
 assistant = Assistant(language_code="en-AU",
